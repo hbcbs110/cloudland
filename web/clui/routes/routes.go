@@ -113,8 +113,8 @@ func New() (m *macaron.Macaron) {
 	m.Post("/glusterfs/:id", glusterfsView.Patch)
 	m.Get("/instances/:id", instanceView.Edit)
 	m.Post("/instances/:id", instanceView.Patch)
-	m.Get("/instances/:id/console", consoleView.ConsoleURL)
-	m.Post("/console/resolve", consoleView.ConsoleResolve)
+	m.Post("/instances/:id/console", consoleView.ConsoleURL)
+	m.Get("/consoleresolver/token/:token", consoleView.ConsoleResolve)
 	m.Get("/interfaces/:id", interfaceView.Edit)
 	m.Post("/interfaces/:id", interfaceView.Patch)
 	m.Post("/interfaces/new", interfaceView.Create)
@@ -142,6 +142,7 @@ func New() (m *macaron.Macaron) {
 	m.Get("/keys", keyView.List)
 	m.Get("/keys/new", keyView.New)
 	m.Post("/keys/new", keyView.Create)
+	m.Post("/keys/confirm", keyView.Confirm)
 	m.Delete("/keys/:id", keyView.Delete)
 	m.Get("/floatingips", floatingipView.List)
 	m.Get("/floatingips/new", floatingipView.New)
@@ -201,7 +202,7 @@ func LinkHandler(c *macaron.Context, store session.Store) {
 		}
 		c.Data["Organization"] = store.Get("org").(string)
 		c.Data["Members"] = store.Get("members").([]*model.Member)
-	} else if link != "" && link != "/" && !strings.HasPrefix(link, "/login") {
+	} else if link != "" && link != "/" && !strings.HasPrefix(link, "/login") && !strings.HasPrefix(link, "/consoleresolver") {
 		c.Redirect("/")
 	}
 }

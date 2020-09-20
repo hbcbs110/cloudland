@@ -182,13 +182,6 @@ func (a *InstanceAdmin) Update(ctx context.Context, id, flavorID int64, hostname
 		log.Println("Failed to query instance ", err)
 		return
 	}
-	if instance.Hostname != hostname {
-		instance.Hostname = hostname
-		if err = db.Save(instance).Error; err != nil {
-			log.Println("Failed to save instance", err)
-			return
-		}
-	}
 	if hyper != int(instance.Hyper) {
 		if instance.Status != "shut_off" {
 			log.Println("Instance must be shutdown before migration")
@@ -202,25 +195,6 @@ func (a *InstanceAdmin) Update(ctx context.Context, id, flavorID int64, hostname
 			log.Println("Migrate vm command execution failed", err)
 			return
 		}
-		instance.Status = "migrating"
-		if err = db.Save(instance).Error; err != nil {
-			log.Println("Failed to save instance", err)
-		}
-		return
-	}
-	if action == "shutdown" || action == "destroy" || action == "start" || action == "suspend" || action == "resume" {
-		control := fmt.Sprintf("inter=%d", instance.Hyper)
-		command := fmt.Sprintf("/opt/cloudland/scripts/backend/action_vm.sh '%d' '%s'", instance.ID, action)
-		err = hyperExecute(ctx, control, command)
-		if err != nil {
-			log.Println("Delete vm command execution failed", err)
-			return
-		}
-		instance.Status = "updating"
-		if err = db.Save(instance).Error; err != nil {
-			log.Println("Failed to save instance", err)
-		}
-		return
 	}
 	if flavorID != instance.FlavorID {
 		if instance.Status == "running" {
@@ -257,6 +231,22 @@ func (a *InstanceAdmin) Update(ctx context.Context, id, flavorID int64, hostname
 		instance.Flavor = flavor
 		if err = db.Save(instance).Error; err != nil {
 			log.Println("Failed to save instance", err)
+			return
+		}
+	}
+	if instance.Hostname != hostname {
+		instance.Hostname = hostname
+		if err = db.Save(instance).Error; err != nil {
+			log.Println("Failed to save instance", err)
+			return
+		}
+	}
+	if action == "shutdown" || action == "destroy" || action == "start" || action == "suspend" || action == "resume" {
+		control := fmt.Sprintf("inter=%d", instance.Hyper)
+		command := fmt.Sprintf("/opt/cloudland/scripts/backend/action_vm.sh '%d' '%s'", instance.ID, action)
+		err = hyperExecute(ctx, control, command)
+		if err != nil {
+			log.Println("Delete vm command execution failed", err)
 			return
 		}
 	}
@@ -660,10 +650,6 @@ func (a *InstanceAdmin) enableVnc(ctx context.Context, instance *model.Instance)
 		return
 	}
 	gateway := &model.Gateway{}
-	if len(instance.Interfaces) == 0 {
-		log.Println("No Interface")
-		return
-	}
 	routerID := instance.Interfaces[0].Address.Subnet.Router
 	if routerID > 0 {
 		gateway.ID = routerID
@@ -727,12 +713,13 @@ func (v *InstanceView) List(c *macaron.Context, store session.Store) {
 	permit := memberShip.CheckPermission(model.Reader)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	hostname := c.QueryTrim("hostname")
 	if limit == 0 {
 		limit = 16
 	}
@@ -742,7 +729,6 @@ func (v *InstanceView) List(c *macaron.Context, store session.Store) {
 	}
 	query := c.QueryTrim("q")
 	total, instances, err := instanceAdmin.List(c.Req.Context(), offset, limit, order, query)
-	
 	if err != nil {
 		if c.Req.Header.Get("X-Json-Format") == "yes" {
 			c.JSON(500, map[string]interface{}{
@@ -759,6 +745,7 @@ func (v *InstanceView) List(c *macaron.Context, store session.Store) {
 	c.Data["Total"] = total
 	c.Data["Pages"] = pages
 	c.Data["Query"] = query
+	c.Data["HostName"] = hostname
 	if c.Req.Header.Get("X-Json-Format") == "yes" {
 		c.JSON(200, map[string]interface{}{
 			"instances": instances,
@@ -775,27 +762,27 @@ func (v *InstanceView) Delete(c *macaron.Context, store session.Store) (err erro
 	memberShip := GetMemberShip(c.Req.Context())
 	id := c.Params("id")
 	if id == "" {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Id is empty"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	instanceID, err := strconv.Atoi(id)
 	if err != nil {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	permit, err := memberShip.CheckOwner(model.Writer, "instances", int64(instanceID))
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	err = instanceAdmin.Delete(c.Req.Context(), int64(instanceID))
 	if err != nil {
-		code := http.StatusInternalServerError
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	c.JSON(200, map[string]interface{}{
@@ -809,8 +796,8 @@ func (v *InstanceView) New(c *macaron.Context, store session.Store) {
 	permit := memberShip.CheckPermission(model.Writer)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	db := DB()
@@ -851,6 +838,7 @@ func (v *InstanceView) New(c *macaron.Context, store session.Store) {
 		c.HTML(500, "500")
 		return
 	}
+	c.Data["HostName"] = c.QueryTrim("hostname")
 	c.Data["Images"] = images
 	c.Data["Flavors"] = flavors
 	c.Data["Subnets"] = subnets
@@ -865,21 +853,21 @@ func (v *InstanceView) Edit(c *macaron.Context, store session.Store) {
 	db := DB()
 	id := c.Params("id")
 	if id == "" {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Id is Empty"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	instanceID, err := strconv.Atoi(id)
 	if err != nil {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	permit, err := memberShip.CheckOwner(model.Writer, "instances", int64(instanceID))
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	instance := &model.Instance{Model: model.Model{ID: int64(instanceID)}}
@@ -908,17 +896,12 @@ func (v *InstanceView) Edit(c *macaron.Context, store session.Store) {
 			}
 		}
 	}
-	vnc, err := instanceAdmin.enableVnc(c.Req.Context(), instance)
-	if err != nil {
-		log.Println("Failed enable VNC", err)
-	}
 	_, flavors, err := flavorAdmin.List(0, -1, "", "")
 	if err := db.Find(&flavors).Error; err != nil {
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
 		return
 	}
-	c.Data["Vnc"] = vnc
 	c.Data["Instance"] = instance
 	c.Data["Subnets"] = subnets
 	c.Data["Flavors"] = flavors
@@ -932,8 +915,8 @@ func (v *InstanceView) Patch(c *macaron.Context, store session.Store) {
 	permit, err := memberShip.CheckOwner(model.Writer, "instances", id)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	flavor := c.QueryInt64("flavor")
@@ -975,8 +958,8 @@ func (v *InstanceView) Patch(c *macaron.Context, store session.Store) {
 		permit, err = memberShip.CheckOwner(model.Writer, "subnets", int64(sID))
 		if !permit {
 			log.Println("Not authorized for this operation")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 		subnetIDs = append(subnetIDs, int64(sID))
@@ -1046,8 +1029,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 	permit := memberShip.CheckPermission(model.Writer)
 	if !permit {
 		log.Println("Need Write permissions")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Need Write permissions"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	redirectTo := "../instances"
@@ -1056,8 +1039,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 	count, err := strconv.Atoi(cnt)
 	if err != nil {
 		log.Println("Invalid instance count", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	hyperID := c.QueryInt("hyper")
@@ -1065,8 +1048,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 		permit := memberShip.CheckPermission(model.Admin)
 		if !permit {
 			log.Println("Need Admin permissions")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Need Admin permissions"
+			c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 	}
@@ -1074,52 +1057,52 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 	err = DB().Take(hyper).Error
 	if err != nil {
 		log.Println("Invalid hypervisor", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	cluster := c.QueryInt64("cluster")
 	if cluster < 0 {
 		log.Println("Invalid cluster ID", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Invalid cluster ID"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	} else if cluster > 0 {
 		permit, err = memberShip.CheckAdmin(model.Writer, "openshifts", cluster)
 		if !permit {
 			log.Println("Not authorized to access openshift cluster")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Not authorized to access openshift cluster"
+			c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 	}
 	image := c.QueryInt64("image")
 	if image <= 0 && cluster <= 0 {
 		log.Println("No valid image ID or cluster ID", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "No valid image ID or cluster ID"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	flavor := c.QueryInt64("flavor")
 	if flavor <= 0 {
 		log.Println("Invalid flavor ID", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Invalid flavor ID"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	primary := c.QueryTrim("primary")
 	primaryID, err := strconv.Atoi(primary)
 	if err != nil {
 		log.Println("Invalid primary subnet ID, %v", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	permit, err = memberShip.CheckAdmin(model.Writer, "subnets", int64(primaryID))
 	if !permit {
 		log.Println("Not authorized to access subnet")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Need Write permissions"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	primaryIP := c.QueryTrim("primaryip")
@@ -1127,8 +1110,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 	primaryMac := c.QueryTrim("primarymac")
 	macAddr, err := v.checkNetparam(int64(primaryID), ipAddr, primaryMac)
 	if err != nil {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	subnets := c.QueryTrim("subnets")
@@ -1143,8 +1126,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 		permit, err = memberShip.CheckAdmin(model.Writer, "subnets", int64(sID))
 		if !permit {
 			log.Println("Not authorized to access subnet")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Not authorized to access subnet"
+			c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 		subnetIDs = append(subnetIDs, int64(sID))
@@ -1161,8 +1144,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 		permit, err = memberShip.CheckOwner(model.Writer, "keys", int64(kID))
 		if !permit {
 			log.Println("Not authorized to access key")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Not authorized to access key"
+			c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 		keyIDs = append(keyIDs, int64(kID))
@@ -1180,8 +1163,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 			permit, err = memberShip.CheckOwner(model.Writer, "security_groups", int64(sgID))
 			if !permit {
 				log.Println("Not authorized to access security group")
-				code := http.StatusUnauthorized
-				c.Error(code, http.StatusText(code))
+				c.Data["ErrorMsg"] = "Not authorized to access security group"
+				c.HTML(http.StatusBadRequest, "error")
 				return
 			}
 			sgIDs = append(sgIDs, int64(sgID))
@@ -1191,8 +1174,8 @@ func (v *InstanceView) Create(c *macaron.Context, store session.Store) {
 		permit, err = memberShip.CheckOwner(model.Writer, "security_groups", int64(sgID))
 		if !permit {
 			log.Println("Not authorized to access security group")
-			code := http.StatusUnauthorized
-			c.Error(code, http.StatusText(code))
+			c.Data["ErrorMsg"] = "Not authorized to access security group"
+			c.HTML(http.StatusBadRequest, "error")
 			return
 		}
 		sgIDs = append(sgIDs, sgID)

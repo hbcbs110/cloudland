@@ -9,7 +9,12 @@ package routes
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"log"
 	"net/http"
 	"strconv"
@@ -23,10 +28,32 @@ import (
 var (
 	keyAdmin = &KeyAdmin{}
 	keyView  = &KeyView{}
+	keyTemp = &KeyTemp{}
 )
 
 type KeyAdmin struct{}
 type KeyView struct{}
+type KeyTemp struct{}
+
+func (point *KeyTemp) Create() (publicKey, privateKey string, err error){
+	// generate key
+	private, er := rsa.GenerateKey(rand.Reader, 1024)
+	if er != nil {
+		log.Println("failed to create privateKey ")
+		err = er
+		return
+	}
+	privateKeyPEM := &pem.Block{Type:"RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(private)}
+	privateKey = string(pem.EncodeToMemory(privateKeyPEM))
+	pub, er := ssh.NewPublicKey(&private.PublicKey)
+	if er != nil {
+		log.Println("failed to create publicKey")
+		err = er
+		return
+	}
+	publicKey = string(ssh.MarshalAuthorizedKey(pub))
+	return
+}
 
 func (a *KeyAdmin) Create(ctx context.Context, name, pubkey string) (key *model.Key, err error) {
 	memberShip := GetMemberShip(ctx)
@@ -103,8 +130,8 @@ func (v *KeyView) List(c *macaron.Context, store session.Store) {
 	permit := memberShip.CheckPermission(model.Reader)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	offset := c.QueryInt64("offset")
@@ -151,29 +178,29 @@ func (v *KeyView) Delete(c *macaron.Context, store session.Store) (err error) {
 	memberShip := GetMemberShip(c.Req.Context())
 	id := c.Params("id")
 	if id == "" {
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Id is Empty"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	keyID, err := strconv.Atoi(id)
 	if err != nil {
 		log.Println("Invalid key id, %v", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	permit, err := memberShip.CheckOwner(model.Writer, "keys", int64(keyID))
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	err = keyAdmin.Delete(int64(keyID))
 	if err != nil {
 		log.Println("Failed to delete key, %v", err)
-		code := http.StatusInternalServerError
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
 	c.JSON(200, map[string]interface{}{
@@ -182,31 +209,44 @@ func (v *KeyView) Delete(c *macaron.Context, store session.Store) (err error) {
 	return
 }
 
-func (v *KeyView) New(c *macaron.Context, store session.Store) {
+func (v *KeyView) New(c *macaron.Context, store session.Store)(){
 	memberShip := GetMemberShip(c.Req.Context())
 	permit := memberShip.CheckPermission(model.Writer)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
-	c.HTML(200, "keys_new")
+	hostname := c.QueryTrim("hostname")
+	hyper := c.QueryTrim("hyper")
+	count := c.QueryTrim("count")
+	userData := c.QueryTrim("userData")
+	
+	if hostname != ""{
+		c.Data["InstanceFlag"] = 1
+	}
+	c.Data["Hostname"] = hostname
+	c.Data["hyper"] = hyper
+	c.Data["count"] = count
+	c.Data["userData"] = userData
+	c.HTML(200, "keys_new");
 }
 
-func (v *KeyView) Create(c *macaron.Context, store session.Store) {
+func (v *KeyView) Confirm(c *macaron.Context, store session.Store){
 	memberShip := GetMemberShip(c.Req.Context())
 	permit := memberShip.CheckPermission(model.Writer)
 	if !permit {
 		log.Println("Not authorized for this operation")
-		code := http.StatusUnauthorized
-		c.Error(code, http.StatusText(code))
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
 		return
 	}
-	redirectTo := "../keys"
+	
 	name := c.QueryTrim("name")
-	pubkey := c.QueryTrim("pubkey")
-	key, err := keyAdmin.Create(c.Req.Context(), name, pubkey)
+	publicKey := c.QueryTrim("PublicKey")
+	hostname := c.QueryTrim("host")
+	key, err := keyAdmin.Create(c.Req.Context(), name, publicKey)
 	if err != nil {
 		log.Println("Failed to create key, %v", err)
 		if c.Req.Header.Get("X-Json-Format") == "yes" {
@@ -222,5 +262,46 @@ func (v *KeyView) Create(c *macaron.Context, store session.Store) {
 		c.JSON(200, key)
 		return
 	}
-	c.Redirect(redirectTo)
+	
+	var redirectTo string
+	if c.QueryTrim("flags") == ""{
+		redirectTo = "../keys"
+		c.Redirect(redirectTo)
+	}else{
+		redirectTo = "../instances?hostname=" + hostname
+		c.Redirect(redirectTo)
+	}
+}
+
+
+
+func (v *KeyView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		c.Data["ErrorMsg"] = "Not authorized for this operation"
+		c.HTML(http.StatusBadRequest, "error")
+		return
+	}
+	if c.QueryTrim("flags") != ""{
+		c.Data["InstanceFlag"] = 1
+	}
+	hostname := c.QueryTrim("host")
+	name := c.QueryTrim("name")
+	publicKey, privateKey, err := keyTemp.Create()
+	
+	if err != nil{
+		log.Println("failed")
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(http.StatusBadRequest, "error")
+		return
+	}
+	
+	
+	c.Data["KeyName"] = name
+	c.Data["PublicKey"] = publicKey
+	c.Data["HostName"] = hostname
+	c.Data["PrivateKey"] = privateKey
+	c.HTML(200, "newKey")
 }
